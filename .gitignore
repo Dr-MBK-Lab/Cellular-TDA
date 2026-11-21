@@ -15,5 +15,5 @@ __pycache__/
 *.pyc
 .env
 
-# pic folder
+# Picture folder
 mbk_pics/*.*
