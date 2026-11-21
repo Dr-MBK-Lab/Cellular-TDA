@@ -3,19 +3,19 @@ import random
 import re
 import pickle
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import gudhi
 import pandas as pd
 import numpy as np
 import gudhi.representations
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 from matplotlib.ticker import FormatStrFormatter
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import ipywidgets as widgets
 from ipywidgets import interact
-
 
 GroupID = Tuple[str, int]
 
@@ -214,21 +214,21 @@ class LandscapeMatrixBuilder:
         self,
         PCA_key: Optional[Any] = None,
         embryo_name: Optional[List[str]] = None,
-        condition: Optional[str] = None,
+        condition: Optional[Union[str, List[str]]] = None,
         properties: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         """Build a matrix of flattened landscapes filtered by embryo_name, condition, and dimensions.
 
         Args:
-            PCA_key: Can be a dict {"condition": "...", "embryo_name": "...", "properties": [...]} 
-                     or tuple (condition, embryo_name, properties). Example ( "All", "All", (0,1) ). When provided, overrides other parameters.
+            PCA_key: Can be a dict {"condition": str or [...], "embryo_name": "...", "properties": [...]} 
+                     or tuple (condition, embryo_name, properties). When provided, overrides other parameters.
             embryo_name: List of embryo names to include. None includes all embryos.
-            condition: Condition to include. None includes all conditions.
+            condition: Condition or list of conditions to include. None includes all.
             properties: Homology dimensions to include. None uses stored TDA dimensions.
         """
         if PCA_key is not None:
             embryo_name, condition, properties = CloudGroupPCA._normalize_pca_key(PCA_key)
-
+       
         if properties is None:
             if self.manager._tda_params is None:
                 raise ValueError("No TDA parameters found. Compute landscapes first.")
@@ -236,16 +236,20 @@ class LandscapeMatrixBuilder:
 
         embryo_names = self._normalize_embryo_names(embryo_name)
         ids = self.manager.list_group_ids()
-
         if embryo_names is not None:
             ids = [gid for gid in ids if gid[0] in embryo_names]
-
+      
         if condition is not None:
-            ids = [gid for gid in ids if self.manager.groups[gid].condition == condition]
+            conditions = {condition} if isinstance(condition, str) else set(condition)
+            ids = [
+                gid
+                for gid in ids
+                if self.manager.groups[gid].condition in conditions
+            ]
 
         row_order = []
         max_width = 0
-
+        
         for gid in ids:
             group = self.manager.groups[gid]
             for prop in properties:
@@ -284,26 +288,27 @@ class CloudGroupPCA:
     self,
     PCA_key: Optional[Any] = None,
     n_components: int = 2,
-    condition: Optional[str] = None,
+    condition: Optional[Union[str, List[str]]] = None,
     embryo_name: Optional[List[str]] = None,
     properties: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
         """Standardize the landscape matrix and run PCA.
 
         Args:)
-            PCA_key: Can be a dict {"condition": "...", "embryo_name": "...", "properties": [...]} 
+            PCA_key: Can be a dict {"condition": str or [...], "embryo_name": "...", "properties": [...]} 
                      or tuple (condition, embryo_name, properties). None values become "All".
                      When provided, overrides other parameters for key generation.
             n_components: Number of PCA components to compute.
-            condition: Condition to include in landscape matrix.
+            condition: Condition or list of conditions to include in PCA.
             embryo_name: List of embryo names to include in landscape matrix.
             properties: List of properties (dimensions) to include in landscape matrix.
         """
-        if properties is None:
-            properties = [0, 1]
+        
+        if properties is None and PCA_key["properties"] is None:
+            raise ValueError("Properties (homology dimensions) must be specified for PCA.")
+        
         if PCA_key is not None:
             embryo_name, condition, properties = CloudGroupPCA._normalize_pca_key(PCA_key)
-    
         # matrix is filtered and flattened landscapes, row_order is list of (group_id, property) for each row
         pca_ = self.manager.build_landscape_matrix(
             PCA_key=PCA_key,
@@ -378,8 +383,10 @@ class CloudGroupPCA:
         unique_props = sorted({prop for _, prop in metadata})
 
         condition_color_map = {
-            "control": "blue",
-            "epha2a": "red",
+            "control-l": "blue",
+            "control-m": "blue",
+            "epha2a-wm": "red",
+            "epha2a-sm": "red",
         }
 
         fig = plt.figure(figsize=figsize, dpi=120)
@@ -809,23 +816,32 @@ class CloudGroupPCA:
     @staticmethod
     def _key(
         embryo_name: Optional[List[str]],
-        condition: Optional[str],
+        condition: Optional[Union[str, List[str]]],
         properties: Optional[List[int]],
-    ) -> Tuple[Any, Optional[str], Tuple[int, ...]]:
+    ) -> Tuple[Any, Any, Tuple[int, ...]]:
         embryo_name_key = "All" if embryo_name is None else tuple(embryo_name)
-        condition_key = "All" if condition is None else condition
+        if condition is None:
+            condition_key = "All"
+        elif isinstance(condition, str):
+            condition_key = condition
+        else:
+            condition_key = tuple(condition)
         prop_key = tuple([0,1] if properties is None else properties)
         return embryo_name_key, condition_key, prop_key
 
     @staticmethod
     def _normalize_pca_key(
         pca_key: Optional[Any],
-    ) -> Tuple[Optional[List[str]], Optional[str], Optional[List[int]]]:
+    ) -> Tuple[
+        Optional[List[str]],
+        Optional[Union[str, List[str]]],
+        Optional[List[int]],
+    ]:
         """Normalize PCA_key from dict or tuple format to (embryo_name, condition, properties).
 
         Accepts:
-        - dict: {"embryo_name": [...], "condition": "...", "properties": [...]}
-        - tuple: (embryo_name, condition, properties)
+        - dict: {"embryo_name": [...], "condition": str or [...], "properties": [...]}
+        - tuple: (embryo_name, condition or [conditions], properties)
         - None: returns (None, None, None)
 
         Converts "All" into None and wraps single values in lists.
@@ -849,7 +865,18 @@ class CloudGroupPCA:
                 f"PCA_key must be dict or tuple, got {type(pca_key).__name__}"
             )
 
-        condition = None if condition == "All" else condition
+        if condition == "All" or condition is None:
+            condition = None
+        elif isinstance(condition, str):
+            pass
+        elif isinstance(condition, (list, tuple)):
+            condition = list(condition)
+            if not all(isinstance(item, str) for item in condition):
+                raise TypeError("PCA_key conditions must be strings.")
+        else:
+            raise TypeError(
+                "PCA_key condition must be a string or list/tuple of strings."
+            )
         if embryo_name == "All" or embryo_name is None:
             embryo_name = None
         elif isinstance(embryo_name, str):
@@ -865,7 +892,6 @@ class CloudGroupPCA:
             properties = list(properties)
 
         return embryo_name, condition, properties
-
     @staticmethod
     def _normalize_display(display: Optional[Dict[str, Any]]) -> Dict[str, List[Any]]:
         if display is None:
@@ -881,9 +907,8 @@ class CloudGroupPCA:
             "properties": properties,
             "embryo_names": embryo_names,
             "condition": list(condition),
-        }
+        }  
 
-  
     def _filter_plot_rows(
         self, 
         coords: np.ndarray,
@@ -908,6 +933,997 @@ class CloudGroupPCA:
             raise ValueError("Display filters excluded all plotted rows.")
 
         return coords[filtered_indices], [metadata[i] for i in filtered_indices]
+
+    def plot_small_multiples(self, PCA_key=None, figsize=(15, 10)):
+        """Strategy 1: Small Multiples (Subplotting)"""
+        import math
+        import matplotlib.cm as cm
+        
+        embryo_name, condition, properties = self._normalize_pca_key(PCA_key)
+        key = self._key(embryo_name, condition, properties)
+        res = self.results[key]
+        coords, metadata = self._filter_plot_rows(res["transformed"], res["row_order"], None)
+        
+        unique_names = sorted({grp.embryo_name for grp, _ in metadata})
+        n_embryos = len(unique_names)
+        cols = 3
+        rows = math.ceil(n_embryos / cols)
+        
+        fig, axes = plt.subplots(rows, cols, figsize=figsize, sharex=True, sharey=True)
+        axes = axes.flatten()
+        cmap = cm.get_cmap('tab20')
+
+        for idx, embryo_val in enumerate(unique_names):
+            ax = axes[idx]
+            color = cmap(idx % 20)
+            
+            indices = [i for i, (grp, p) in enumerate(metadata) if grp.embryo_name == embryo_val]
+            indices = sorted(indices, key=lambda i: metadata[i][0].timestep)
+            
+            if len(indices) > 1:
+                traj = coords[indices]
+                ax.plot(traj[:, 0], traj[:, 1], color=color, alpha=0.6, lw=2)
+                ax.scatter(traj[:, 0], traj[:, 1], color=color, s=20)
+                ax.scatter(traj[0, 0], traj[0, 1], color='black', marker='x', s=60, label='Start')
+                
+            ax.set_title(embryo_val)
+            ax.grid(True, linestyle=":", alpha=0.4)
+
+        for i in range(n_embryos, len(axes)):
+            fig.delaxes(axes[i])
+            
+        fig.suptitle(f"PCA Trajectories (Small Multiples): H{properties}")
+        plt.tight_layout()
+        return fig
+
+    def plot_condition_averages(self, PCA_key=None, figsize=(10, 8)):
+        """Strategy 2: Condition Averaging (Macro View)"""
+        embryo_name, condition, properties = self._normalize_pca_key(PCA_key)
+        key = self._key(embryo_name, condition, properties)
+        res = self.results[key]
+        coords, metadata = self._filter_plot_rows(res["transformed"], res["row_order"], None)
+        
+        df = pd.DataFrame({
+            'PC1': coords[:, 0], 'PC2': coords[:, 1],
+            'Condition': [grp.condition for grp, _ in metadata],
+            'Timestep': [grp.timestep for grp, _ in metadata]
+        })
+        
+        agg_df = df.groupby(['Condition', 'Timestep']).agg(['mean', 'std']).reset_index()
+        
+        fig, ax = plt.subplots(figsize=figsize)
+        colors = {'control': 'blue', 'epha2a': 'red'}
+        
+        for cond in agg_df['Condition'].unique():
+            cond_data = agg_df[agg_df['Condition'] == cond].sort_values('Timestep')
+            t = cond_data['Timestep']
+            pc1_mean, pc1_std = cond_data['PC1']['mean'], cond_data['PC1']['std']
+            pc2_mean, pc2_std = cond_data['PC2']['mean'], cond_data['PC2']['std']
+            
+            color = colors.get(cond, 'green')
+            ax.plot(pc1_mean, pc2_mean, label=f"{cond} (Mean)", color=color, linewidth=3)
+            ax.scatter(pc1_mean.iloc[0], pc2_mean.iloc[0], color=color, marker='s', s=100) # Start point
+            
+            # Shaded variance approximations
+            ax.fill_between(pc1_mean, pc2_mean - pc2_std, pc2_mean + pc2_std, color=color, alpha=0.15)
+            
+        ax.set_xlabel("PC1")
+        ax.set_ylabel("PC2")
+        ax.set_title("Condition Averaged Trajectories with Std Dev")
+        ax.legend()
+        ax.grid(True, linestyle=":", alpha=0.4)
+        return fig
+
+    def plot_spline_smoothing(self, PCA_key=None, smooth_factor=1, step=5, figsize=(12, 9)):
+        """Strategy 3: Downsampling and Spline Smoothing"""
+        from scipy.interpolate import make_interp_spline
+        import matplotlib.cm as cm
+
+        embryo_name, condition, properties = self._normalize_pca_key(PCA_key)
+        key = self._key(embryo_name, condition, properties)
+        res = self.results[key]
+        coords, metadata = self._filter_plot_rows(res["transformed"], res["row_order"], None)
+        
+        unique_names = sorted({grp.embryo_name for grp, _ in metadata})
+        fig, ax = plt.subplots(figsize=figsize)
+        cmap = cm.get_cmap('tab20')
+        
+        for idx, embryo_val in enumerate(unique_names):
+            indices = [i for i, (grp, p) in enumerate(metadata) if grp.embryo_name == embryo_val]
+            indices = sorted(indices, key=lambda i: metadata[i][0].timestep)
+            
+            if len(indices) > smooth_factor:
+                traj = coords[indices]
+                color = cmap(idx % 20)
+                
+                # B-Spline smoothing
+                # t = np.arange(len(traj))
+                # t_smooth = np.linspace(0, len(traj) - 1, 300)
+                # spline_x = make_interp_spline(t, traj[:, 0], k=smooth_factor)(t_smooth)
+                # spline_y = make_interp_spline(t, traj[:, 1], k=smooth_factor)(t_smooth)
+                
+                ax.plot(spline_x, spline_y, color=color, alpha=0.7, lw=2)
+                
+                # Downsampled arrows
+                downsampled = traj[::step]
+                for j in range(len(downsampled) - 1):
+                    start, end = downsampled[j], downsampled[j+1]
+                    ax.annotate('', xy=end, xytext=start,
+                                arrowprops=dict(arrowstyle="->", color=color, lw=1.5, alpha=0.8))
+                                
+                ax.scatter(traj[0, 0], traj[0, 1], color=color, marker='x', s=80)
+
+        ax.set_title("Spline Smoothed Trajectories with Downsampled Vectors")
+        ax.grid(True, linestyle=":", alpha=0.4)
+        return fig
+
+    def plot_averaged_vectors(
+        self, 
+        PCA_key=None, 
+        do_not_include=None, 
+        step=5, 
+        figsize=(12, 9)
+    ):
+        """Strategy 3: Averaged Trajectory Vectors
+        
+        Averages the PCA coordinates over every `step` timesteps to reduce 
+        visual clutter, plotting the resulting macro-trajectory as connected arrows.
+        Filters out specific labels, conditions, or properties using do_not_include.
+        """
+  
+
+        embryo_name, condition, properties = self._normalize_pca_key(PCA_key)
+        key = self._key(embryo_name, condition, properties)
+        
+        if key not in self.results:
+            raise ValueError(f"Run PCA for {key} first.")
+            
+        res = self.results[key]
+        
+        # We now pass the do_not_include dictionary into your existing filter method
+        coords, metadata = self._filter_plot_rows(res["transformed"], res["row_order"], do_not_include)
+        
+        unique_names = sorted({grp.embryo_name for grp, _ in metadata})
+        fig, ax = plt.subplots(figsize=figsize)
+        cmap = cm.get_cmap('tab20')
+        
+        for idx, embryo_val in enumerate(unique_names):
+            # Only process if this embryo hasn't been completely filtered out
+            indices = [i for i, (grp, p) in enumerate(metadata) if grp.embryo_name == embryo_val]
+            if not indices:
+                continue
+                
+            indices = sorted(indices, key=lambda i: metadata[i][0].timestep)
+            
+            if len(indices) >= step:
+                traj = coords[indices]
+                color = cmap(idx % 20)
+                
+                # 1. Chunking and Averaging the trajectory
+                averaged_points = []
+                for i in range(0, len(traj), step):
+                    chunk = traj[i:i+step]
+                    averaged_points.append(chunk.mean(axis=0))
+                averaged_points = np.array(averaged_points)
+                
+                # 2. Draw lines connecting the averaged points
+                ax.plot(averaged_points[:, 0], averaged_points[:, 1], color=color, alpha=0.5, lw=2)
+                
+                # 3. Draw arrows between the averaged window points
+                for j in range(len(averaged_points) - 1):
+                    start, end = averaged_points[j], averaged_points[j+1]
+                    ax.annotate('', xy=end, xytext=start,
+                                arrowprops=dict(arrowstyle="->", color=color, lw=2, alpha=0.9))
+                                
+                # Mark the starting point of the averaged trajectory
+                ax.scatter(averaged_points[0, 0], averaged_points[0, 1], color='black', marker='x', s=80, zorder=5)
+                
+                # Optional: Add a label at the end of the trajectory so you know which is which
+                ax.text(averaged_points[-1, 0], averaged_points[-1, 1], embryo_val, fontsize=9, zorder=10)
+
+        evr = res["explained_variance_ratio"]
+        ax.set_xlabel(f"PC1 ({evr[0]*100:.2f}%)")
+        ax.set_ylabel(f"PC2 ({evr[1]*100:.2f}%)")
+        ax.set_title(f"Averaged Trajectory Vectors (Window = {step})")
+        ax.grid(True, linestyle=":", alpha=0.4)
+        
+        plt.tight_layout()
+        plt.close(fig)
+        return fig
+
+    def plot_sequential_vectors(
+        self,
+        PCA_key=None,
+        do_not_include=None,
+        figsize=(12, 9),
+    ):
+        """Plot trajectories with sequentially reoriented displacement vectors.
+
+        For each embryo and homology property, the first displacement is kept
+        unchanged. Each later displacement is oriented along the cumulative sum
+        of the original displacements so far, while retaining its original
+        length. Segments with a zero cumulative direction are skipped.
+        """
+        embryo_name, condition, properties = self._normalize_pca_key(PCA_key)
+        key = self._key(embryo_name, condition, properties)
+        if key not in self.results:
+            raise ValueError(f"Run PCA for {key} first.")
+
+        res = self.results[key]
+        coords, metadata = self._filter_plot_rows(
+            res["transformed"], res["row_order"], do_not_include
+        )
+        trajectories = sorted(
+            {(group.embryo_name, prop) for group, prop in metadata},
+            key=lambda item: (item[0], item[1]),
+        )
+
+        fig, ax = plt.subplots(figsize=figsize)
+        cmap = cm.get_cmap("tab20")
+        plotted_points = []
+
+        for trajectory_idx, (embryo_val, prop) in enumerate(trajectories):
+            indices = [
+                i
+                for i, (group, row_prop) in enumerate(metadata)
+                if group.embryo_name == embryo_val and row_prop == prop
+            ]
+            indices.sort(key=lambda i: metadata[i][0].timestep)
+            trajectory = coords[indices]
+            start = trajectory[0].copy()
+            plotted_points.append(start)
+            color = cmap(trajectory_idx % 20)
+
+            original_vectors = np.diff(trajectory, axis=0)
+            current_point = start.copy()
+            path_points = [current_point.copy()]
+
+            for vector_idx, vector in enumerate(original_vectors):
+                if vector_idx == 0:
+                    adjusted_vector = vector.copy()
+                else:
+                    cumulative_vector = original_vectors[: vector_idx + 1].sum(axis=0)
+                    cumulative_norm = np.linalg.norm(cumulative_vector)
+                    if cumulative_norm <= np.finfo(float).eps:
+                        continue
+                    adjusted_vector = (
+                        cumulative_vector / cumulative_norm
+                    ) * np.linalg.norm(vector)
+
+                if np.linalg.norm(adjusted_vector) <= np.finfo(float).eps:
+                    continue
+
+                next_point = current_point + adjusted_vector
+                ax.annotate(
+                    "",
+                    xy=next_point,
+                    xytext=current_point,
+                    arrowprops=dict(
+                        arrowstyle="->",
+                        color=color,
+                        linewidth=1.8,
+                        alpha=0.85,
+                    ),
+                )
+                current_point = next_point
+                path_points.append(current_point.copy())
+
+            path = np.asarray(path_points)
+            plotted_points.extend(path[1:])
+            ax.plot(path[:, 0], path[:, 1], color=color, alpha=0.5, linewidth=1.5)
+            ax.scatter(start[0], start[1], color="black", marker="x", s=70, zorder=5)
+            label = embryo_val if len({p for _, p in trajectories}) == 1 else f"{embryo_val} H{prop}"
+            ax.text(
+                current_point[0],
+                current_point[1],
+                label,
+                fontsize=8,
+                ha="left",
+                va="bottom",
+            )
+
+        points_array = np.asarray(plotted_points)
+        x_min, y_min = points_array.min(axis=0)
+        x_max, y_max = points_array.max(axis=0)
+        x_padding = (x_max - x_min) * 0.05 if x_max > x_min else 0.1
+        y_padding = (y_max - y_min) * 0.05 if y_max > y_min else 0.1
+        ax.set_xlim(x_min - x_padding, x_max + x_padding)
+        ax.set_ylim(y_min - y_padding, y_max + y_padding)
+
+        explained_variance = res["explained_variance_ratio"]
+        ax.set_xlabel(f"PC1 ({explained_variance[0] * 100:.2f}%)")
+        ax.set_ylabel(f"PC2 ({explained_variance[1] * 100:.2f}%)")
+        ax.set_title("Sequentially Reoriented Trajectory Vectors")
+        ax.grid(True, linestyle=":", alpha=0.4)
+        fig.tight_layout()
+        plt.close(fig)
+        return fig
+    
+    def plot_interactive_plotly(
+        self,
+        PCA_key=None,
+        showTrajectories=True,
+        do_not_include=None,
+        x_range: Optional[Tuple[float, float]] = None,
+        y_range: Optional[Tuple[float, float]] = None,
+        features: Optional[Dict[str, Any]] = None,
+        *,
+        PCA_Space=None,
+    ):
+        """Create an interactive Plotly view with configurable display features.
+        ``features`` accepts:
+        - ``show_trajectories``: draw connecting lines (default: True).
+        - ``x_range`` / ``y_range``: fixed axis bounds; omitted ranges are padded
+          around the displayed points.
+        - ``do_not_include``: rows to exclude, using the standard display filters.
+        - ``markers``: show markers (bool), map embryo names to Plotly symbols
+          (for example ``{"CL1": "square"}``), or configure global ``size``,
+          ``symbol``, ``opacity``, ``line_width``, and ``line_color``.
+        - ``marker_symbols``: explicit per-embryo Plotly marker symbol mapping.
+        - ``group_colors``: mapping from embryo name to Plotly color.
+        - ``condition_colors``: mapping from condition name to Plotly color,
+          matched case-insensitively (for example ``{"control-l": "blue"}``).
+          ``group_colors`` takes precedence when both mappings match.
+        - ``line_width`` / ``line_dash``: trajectory line styling.
+        - ``title``, ``template``, ``hovermode``, and ``show_legend``: layout controls.
+
+        Values supplied in ``features`` take precedence over the corresponding
+        legacy keyword arguments.
+        """
+        import plotly.graph_objects as go
+        
+        allowed_features = {
+            "show_trajectories",
+            "x_range",
+            "y_range",
+            "do_not_include",
+            "markers",
+            "marker_symbols",
+            "group_colors",
+            "condition_colors",
+            "line_width",
+            "line_dash",
+            "title",
+            "template",
+            "hovermode",
+            "show_legend",
+        }
+        features = {} if features is None else features
+        if not isinstance(features, dict):
+            raise TypeError("features must be a dictionary.")
+        unknown_features = set(features) - allowed_features
+        if unknown_features:
+            raise ValueError(f"Unknown plot feature(s): {sorted(unknown_features)}")
+
+        show_trajectories = features.get("show_trajectories", showTrajectories)
+        if not isinstance(show_trajectories, bool):
+            raise TypeError("features['show_trajectories'] must be a bool.")
+        x_range = features.get("x_range", x_range)
+        y_range = features.get("y_range", y_range)
+        do_not_include = features.get("do_not_include", do_not_include)
+        group_colors = features.get("group_colors", {})
+        if not isinstance(group_colors, dict):
+            raise TypeError("features['group_colors'] must be a dictionary.")
+        normalized_group_colors = {}
+        for name, color in group_colors.items():
+            if not isinstance(name, str):
+                raise TypeError("features['group_colors'] keys must be embryo names.")
+            normalized_name = name.strip()
+            if normalized_name in normalized_group_colors:
+                raise ValueError(
+                    "features['group_colors'] contains duplicate embryo names "
+                    f"after trimming whitespace: {normalized_name!r}"
+                )
+            normalized_group_colors[normalized_name] = color
+
+        condition_colors = features.get("condition_colors", {})
+        if not isinstance(condition_colors, dict):
+            raise TypeError("features['condition_colors'] must be a dictionary.")
+        normalized_condition_colors = {}
+        for name, color in condition_colors.items():
+            if not isinstance(name, str):
+                raise TypeError(
+                    "features['condition_colors'] keys must be condition names."
+                )
+            normalized_name = name.strip().casefold()
+            if normalized_name in normalized_condition_colors:
+                raise ValueError(
+                    "features['condition_colors'] contains duplicate condition "
+                    f"names after normalization: {normalized_name!r}"
+                )
+            normalized_condition_colors[normalized_name] = color
+
+        markers = features.get("markers", True)
+        allowed_marker_options = {
+            "size",
+            "symbol",
+            "opacity",
+            "line_width",
+            "line_color",
+        }
+        if isinstance(markers, bool):
+            show_markers = markers
+            marker_options = {}
+            marker_symbols = {}
+        elif isinstance(markers, dict):
+            show_markers = True
+            marker_option_keys = set(markers) & allowed_marker_options
+            if marker_option_keys and not set(markers) <= allowed_marker_options:
+                raise ValueError(
+                    "Do not mix global marker options with embryo names in "
+                    "features['markers']; use features['marker_symbols'] for "
+                    "per-embryo symbols alongside global marker styling."
+                )
+            if set(markers) <= allowed_marker_options:
+                marker_options = markers
+                marker_symbols = {}
+            else:
+                marker_options = {}
+                marker_symbols = markers
+        else:
+            raise TypeError(
+                "features['markers'] must be a bool or dictionary of marker "
+                "options or per-embryo symbols."
+            )
+
+        explicit_marker_symbols = features.get("marker_symbols", {})
+        if not isinstance(explicit_marker_symbols, dict):
+            raise TypeError("features['marker_symbols'] must be a dictionary.")
+        if set(marker_symbols) & set(explicit_marker_symbols):
+            raise ValueError(
+                "Provide each embryo's marker symbol in either 'markers' or "
+                "'marker_symbols', not both."
+            )
+        marker_symbols = {**marker_symbols, **explicit_marker_symbols}
+        normalized_marker_symbols = {}
+        for name, symbol in marker_symbols.items():
+            if not isinstance(name, str):
+                raise TypeError(
+                    "Per-embryo marker symbol keys must be embryo names."
+                )
+            normalized_name = name.strip()
+            if normalized_name in normalized_marker_symbols:
+                raise ValueError(
+                    "Per-embryo marker symbols contain duplicate embryo names "
+                    f"after trimming whitespace: {normalized_name!r}"
+                )
+            if not isinstance(symbol, str):
+                raise TypeError(
+                    f"Marker symbol for {name!r} must be a Plotly symbol string."
+                )
+            normalized_marker_symbols[normalized_name] = symbol
+
+        line_width = features.get("line_width", 2)
+        if (
+            not isinstance(line_width, (int, float, np.number))
+            or not np.isfinite(line_width)
+            or line_width < 0
+        ):
+            raise ValueError("features['line_width'] must be a non-negative number.")
+        line_dash = features.get("line_dash", "solid")
+
+        if PCA_key is not None and PCA_Space is not None:
+            raise ValueError("Provide either PCA_key or PCA_Space, not both.")
+        pca_key = PCA_key if PCA_key is not None else PCA_Space
+        embryo_name, condition, properties = self._normalize_pca_key(pca_key)
+        key = self._key(embryo_name, condition, properties)
+        res = self.results[key]
+        coords, metadata = self._filter_plot_rows(
+            res["transformed"], res["row_order"], do_not_include
+        )
+
+        def resolve_axis_range(
+            values: np.ndarray,
+            requested_range: Optional[Tuple[float, float]],
+            axis_name: str,
+        ) -> Tuple[float, float]:
+            if requested_range is not None:
+                if not isinstance(requested_range, (tuple, list, np.ndarray)):
+                    raise ValueError(
+                        f"{axis_name}_range must contain two finite values "
+                        "in increasing order."
+                    )
+                bounds = np.asarray(requested_range)
+                if (
+                    bounds.shape != (2,)
+                    or not np.issubdtype(bounds.dtype, np.number)
+                    or not np.all(np.isfinite(bounds))
+                    or bounds[0] >= bounds[1]
+                ):
+                    raise ValueError(
+                        f"{axis_name}_range must contain two finite values "
+                        "in increasing order."
+                    )
+                return float(bounds[0]), float(bounds[1])
+
+            lower = float(np.min(values))
+            upper = float(np.max(values))
+            padding = (upper - lower) * 0.05 if upper > lower else 0.1
+            return lower - padding, upper + padding
+
+        x_axis_range = resolve_axis_range(coords[:, 0], x_range, "x")
+        y_axis_range = resolve_axis_range(coords[:, 1], y_range, "y")
+        
+        unique_names = sorted({grp.embryo_name for grp, _ in metadata})
+        fig = go.Figure()
+        
+        for embryo_val in unique_names:
+            indices = [i for i, (grp, p) in enumerate(metadata) if grp.embryo_name == embryo_val]
+            indices = sorted(indices, key=lambda i: metadata[i][0].timestep)
+            
+            if not indices:
+                continue
+                
+            traj = coords[indices]
+            timesteps = [metadata[i][0].timestep for i in indices]
+            hover_text = [f"Embryo: {embryo_val}<br>Time: {t}<br>Cond: {metadata[indices[0]][0].condition}" for t in timesteps]
+            mode = "+".join(
+                mode_part
+                for enabled, mode_part in (
+                    (show_trajectories, "lines"),
+                    (show_markers, "markers"),
+                )
+                if enabled
+            ) or "none"
+            trace = {
+                "x": traj[:, 0],
+                "y": traj[:, 1],
+                "mode": mode,
+                "name": embryo_val,
+                "text": hover_text,
+                "hoverinfo": "text",
+                "showlegend": features.get("show_legend", True),
+            }
+            if show_trajectories:
+                trace["line"] = {
+                    "width": line_width,
+                    "dash": line_dash,
+                }
+            if show_markers:
+                marker = {
+                    "size": 6,
+                    "symbol": "circle",
+                    "opacity": 1,
+                    "line": {"width": 1, "color": "White"},
+                }
+                marker.update(
+                    {
+                        "size": marker_options.get("size", marker["size"]),
+                        "symbol": normalized_marker_symbols.get(
+                            embryo_val.strip(),
+                            marker_options.get("symbol", marker["symbol"]),
+                        ),
+                        "opacity": marker_options.get("opacity", marker["opacity"]),
+                        "line": {
+                            "width": marker_options.get(
+                                "line_width", marker["line"]["width"]
+                            ),
+                            "color": marker_options.get(
+                                "line_color", marker["line"]["color"]
+                            ),
+                        },
+                    }
+                )
+                trace["marker"] = marker
+            normalized_embryo_name = embryo_val.strip()
+            condition_name = metadata[indices[0]][0].condition.strip().casefold()
+            color = normalized_condition_colors.get(condition_name)
+            color = normalized_group_colors.get(normalized_embryo_name, color)
+            if color is not None:
+                if show_trajectories:
+                    trace["line"]["color"] = color
+                if show_markers:
+                    trace["marker"]["color"] = color
+            
+            fig.add_trace(go.Scatter(**trace))
+            
+        fig.update_layout(
+            title=features.get(
+                "title",
+                (
+                    "Interactive PCA Trajectories (Click legend to toggle)"
+                    if show_trajectories
+                    else "Interactive PCA Points"
+                ),
+            ),
+            xaxis_title=f"PC1 ({res['explained_variance_ratio'][0]*100:.2f}%)",
+            yaxis_title=f"PC2 ({res['explained_variance_ratio'][1]*100:.2f}%)",
+            hovermode=features.get("hovermode", "closest"),
+            template=features.get("template", "plotly_white"),
+            xaxis=dict(range=x_axis_range, autorange=False),
+            yaxis=dict(range=y_axis_range, autorange=False),
+        )
+        return fig
+   
+    def plot_trajectory_gradient_vectors(
+        self,
+        PCA_key: Optional[Any] = None,
+        plot_criteria: Optional[Dict[str, Any]] = None,
+        show_trajectories: bool = True,
+        do_not_include: Optional[Dict[str, Any]] = None,
+        figsize: Tuple[int, int] = (12, 9),
+        scale: float = 1.0,
+        annotate: bool = False,
+        embryo_name: Optional[List[str]] = None,
+        condition: Optional[str] = None,
+        properties: Optional[List[int]] = None,
+    ) -> plt.Figure:
+        """Plot embryo paths through PCA space as a sequence of gradient vectors.
+
+        Each embryo/property trajectory is rendered as a series of consecutive arrows.
+        The color of the arrows and points transitions smoothly from a light tint at 
+        t=0 to the embryo's full base color at the final timestep.
+        """
+        import matplotlib.cm as cm
+        from matplotlib.colors import LinearSegmentedColormap
+
+        if PCA_key is not None:
+            embryo_name, condition, properties = CloudGroupPCA._normalize_pca_key(PCA_key)
+        elif plot_criteria is not None:
+            embryo_name = plot_criteria.get("embryo_name", embryo_name)
+            condition = plot_criteria.get("condition", condition)
+            properties = plot_criteria.get("properties", properties)
+
+        if properties is None:
+            properties = [0, 1]
+
+        key = self._key(embryo_name, condition, properties)
+        if key not in self.results:
+            raise ValueError(f"Run PCA for {key} first.")
+
+        res = self.results[key]
+        coords = res["transformed"]
+
+        if coords.shape[1] < 2:
+            raise ValueError("Need at least two PCA components to plot trajectory vectors.")
+
+        row_order = res["row_order"]
+        coords, metadata = self._filter_plot_rows(coords, row_order, do_not_include)
+
+        unique_names = sorted({grp.embryo_name for grp, _ in metadata})
+        unique_props = sorted({prop for _, prop in metadata})
+
+        cmap = cm.get_cmap('tab20')
+        embryo_color_map = {
+            name: cmap(i % 20) for i, name in enumerate(unique_names)
+        }
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        for embryo_name_val in unique_names:
+            base_color = embryo_color_map[embryo_name_val]
+            light_color = (
+                base_color[0] + (1 - base_color[0]) * 0.7,
+                base_color[1] + (1 - base_color[1]) * 0.7,
+                base_color[2] + (1 - base_color[2]) * 0.7,
+                base_color[3]
+            )
+            embryo_cmap = LinearSegmentedColormap.from_list('embryo_grad', [light_color, base_color])
+
+            for prop in unique_props:
+                sample_indices = [
+                    i for i, (grp, p) in enumerate(metadata)
+                    if grp.embryo_name == embryo_name_val and p == prop
+                ]
+
+                sample_indices = sorted(
+                    sample_indices,
+                    key=lambda i: metadata[i][0].timestep,
+                )
+
+                if len(sample_indices) < 2:
+                    continue
+
+                traj_coords = coords[sample_indices]
+                num_points = len(traj_coords)
+                denominator = num_points - 1 if num_points > 1 else 1
+
+                if show_trajectories:
+                    for j in range(num_points - 1):
+                        start = traj_coords[j]
+                        end = traj_coords[j + 1]
+                        vec = (end - start) * scale
+                        
+                        color_fraction = j / denominator
+                        vector_color = embryo_cmap(color_fraction)
+
+                        ax.quiver(
+                            start[0], start[1], vec[0], vec[1],
+                            angles="xy", scale_units="xy", scale=1,
+                            color=vector_color, alpha=0.8,
+                            width=0.006, headwidth=5, headlength=7,
+                            headaxislength=6, zorder=4,
+                        )
+
+                point_colors = [embryo_cmap(i / denominator) for i in range(num_points)]
+                
+                ax.scatter(
+                    traj_coords[:, 0], traj_coords[:, 1],
+                    color=point_colors, marker="o", s=60,
+                    edgecolors="white", linewidth=0.8, zorder=5,
+                )
+
+                ax.scatter(
+                    traj_coords[0, 0], traj_coords[0, 1],
+                    color=embryo_cmap(0.0), marker="x", s=100,
+                    linewidth=2, zorder=6,
+                )
+
+                if annotate:
+                    ax.text(
+                        traj_coords[-1, 0] + 0.01, traj_coords[-1, 1] + 0.01,
+                        f"{embryo_name_val} H{prop}", fontsize=8,
+                        ha="left", va="bottom", color="black", zorder=6,
+                    )
+
+        evr = res["explained_variance_ratio"]
+        ax.set_xlabel(f"PC1 ({evr[0]*100:.2f}%)", fontsize=14)
+        ax.set_ylabel(f"PC2 ({evr[1]*100:.2f}%)", fontsize=14)
+
+        ax.set_title(
+            f"Gradient Trajectory Vectors in PCA Space: {embryo_name or ''} "
+            f"{condition or ''} H{properties}\n"
+            "Color intensifies over time for each embryo"
+        )
+
+        ax.axhline(0, color="black", linewidth=0.8, alpha=0.3)
+        ax.axvline(0, color="black", linewidth=0.8, alpha=0.3)
+        ax.grid(True, linestyle=":", alpha=0.4)
+        ax.set_aspect("equal", adjustable="datalim")
+        fig.tight_layout()
+        plt.close(fig)
+        return fig
+    
+    def plot_sequential_pca_trajectories(
+        self,
+        PCA_key: Optional[Any] = None,
+        n_components: int = 2,
+    ):
+        """Create one Plotly figure of sequentially reoriented PCA trajectories.
+
+        PCA is computed for ``PCA_key`` when no cached result exists or when the
+        cached result has a different number of components.
+        """
+        import plotly.graph_objects as go
+        from plotly.colors import qualitative
+
+        if not isinstance(n_components, int) or n_components < 2:
+            raise ValueError("n_components must be an integer greater than or equal to 2.")
+
+        embryo_name, condition, properties = self._normalize_pca_key(PCA_key)
+        key = self._key(embryo_name, condition, properties)
+
+        cached_result = self.results.get(key)
+        cached_components = (
+            cached_result["transformed"].shape[1]
+            if cached_result is not None
+            else None
+        )
+
+        if cached_result is None or cached_components != n_components:
+            result = self.run(
+                PCA_key=PCA_key,
+                n_components=n_components,
+            )
+        else:
+            result = cached_result
+
+        coords = np.asarray(result["transformed"])
+        row_order = result["row_order"]
+
+        if coords.ndim != 2 or coords.shape[1] < 2:
+            raise ValueError(
+                "At least two PCA components are required for trajectory plotting."
+            )
+
+        trajectories = sorted(
+            {
+                (
+                    self.manager.groups[group_id].embryo_name,
+                    prop,
+                )
+                for group_id, prop in row_order
+            },
+            key=lambda item: (item[0], item[1]),
+        )
+
+        trajectory_data = []
+        all_points = []
+
+        for embryo_value, prop in trajectories:
+            indices = [
+                index
+                for index, (group_id, row_prop) in enumerate(row_order)
+                if (
+                    self.manager.groups[group_id].embryo_name == embryo_value
+                    and row_prop == prop
+                )
+            ]
+            indices.sort(
+                key=lambda index: self.manager.groups[
+                    row_order[index][0]
+                ].timestep
+            )
+
+            if len(indices) < 2:
+                continue
+
+            trajectory = coords[indices, :2]
+            original_vectors = np.diff(trajectory, axis=0)
+
+            current_point = trajectory[0].copy()
+            path_points = [current_point.copy()]
+            timesteps = [
+                self.manager.groups[row_order[indices[0]][0]].timestep
+            ]
+
+            for vector_index, vector in enumerate(original_vectors):
+                if vector_index == 0:
+                    adjusted_vector = vector.copy()
+                else:
+                    cumulative_vector = original_vectors[
+                        : vector_index + 1
+                    ].sum(axis=0)
+                    cumulative_norm = np.linalg.norm(cumulative_vector)
+
+                    if cumulative_norm <= np.finfo(float).eps:
+                        continue
+
+                    adjusted_vector = (
+                        cumulative_vector / cumulative_norm
+                    ) * np.linalg.norm(vector)
+
+                if np.linalg.norm(adjusted_vector) <= np.finfo(float).eps:
+                    continue
+
+                current_point = current_point + adjusted_vector
+                path_points.append(current_point.copy())
+
+                endpoint_index = indices[vector_index + 1]
+                timesteps.append(
+                    self.manager.groups[
+                        row_order[endpoint_index][0]
+                    ].timestep
+                )
+
+            path_points = np.asarray(path_points)
+
+            if len(path_points) < 2:
+                continue
+
+            trajectory_data.append(
+                {
+                    "name": f"{embryo_value} | H{prop}",
+                    "legendgroup": f"{embryo_value}-H{prop}",
+                    "points": path_points,
+                    "timesteps": timesteps,
+                }
+            )
+            all_points.extend(path_points)
+
+        if not trajectory_data:
+            raise ValueError(
+                "No trajectories with at least two timesteps were found."
+            )
+
+        fig = go.Figure()
+        trajectory_colors = qualitative.Dark24
+
+        for trajectory_index, trajectory in enumerate(trajectory_data):
+            points = trajectory["points"]
+            color = trajectory_colors[
+                trajectory_index % len(trajectory_colors)
+            ]
+
+            endpoint_labels = [""] * len(points)
+            endpoint_labels[-1] = trajectory["name"]
+
+            fig.add_trace(
+                go.Scatter(
+                    x=points[:, 0],
+                    y=points[:, 1],
+                    customdata=np.asarray(
+                        trajectory["timesteps"]
+                    ).reshape(-1, 1),
+                    mode="lines+markers+text",
+                    text=endpoint_labels,
+                    textposition="top right",
+                    name=trajectory["name"],
+                    legendgroup=trajectory["legendgroup"],
+                    marker={"size": 6, "color": color},
+                    line={"width": 1.8, "color": color},
+                    hovertemplate=(
+                        f"{trajectory['name']}<br>"
+                        "Timestep: %{customdata[0]}<br>"
+                        "PC1: %{x:.3f}<br>"
+                        "PC2: %{y:.3f}<extra></extra>"
+                    ),
+                )
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[points[0, 0]],
+                    y=[points[0, 1]],
+                    mode="markers",
+                    name=f"Start: {trajectory['name']}",
+                    legendgroup=trajectory["legendgroup"],
+                    showlegend=False,
+                    marker={
+                        "symbol": "x",
+                        "size": 10,
+                        "color": "black",
+                    },
+                    hoverinfo="skip",
+                )
+            )
+
+        all_points_array = np.asarray(all_points)
+        x_min, y_min = all_points_array.min(axis=0)
+        x_max, y_max = all_points_array.max(axis=0)
+
+        x_padding = (x_max - x_min) * 0.2 if x_max > x_min else 0.1
+        y_padding = (y_max - y_min) * 0.2 if y_max > y_min else 0.1
+
+        variance_ratio = np.asarray(
+            result["explained_variance_ratio"]
+        )
+
+        conditions = condition
+        if isinstance(conditions, str):
+            conditions = [conditions]
+        if conditions is None:
+            conditions = ["All"]
+
+        property_label = (
+            "All"
+            if properties is None
+            else ", ".join(f"H{prop}" for prop in properties)
+        )
+
+        title = (
+            f"{' + '.join(conditions)} | "
+            f"{property_label} | "
+            f"{n_components} PCA components"
+        )
+
+        fig.update_layout(
+            title=title,
+            height=800,
+            width=1100,
+            template="plotly_white",
+            xaxis={
+                "title": f"PC1 ({variance_ratio[0]:.1%})",
+                "range": [
+                    x_min - x_padding,
+                    x_max + x_padding,
+                ],
+                "autorange": False,
+                "showgrid": True,
+                "zeroline": True,
+            },
+            yaxis={
+                "title": f"PC2 ({variance_ratio[1]:.1%})",
+                "range": [
+                    y_min - y_padding,
+                    y_max + y_padding,
+                ],
+                "autorange": False,
+                "showgrid": True,
+                "zeroline": True,
+                "scaleanchor": "x",
+                "scaleratio": 1,
+            },
+            legend={
+                "orientation": "h",
+                "y": -0.15,
+                "x": 0.5,
+                "xanchor": "center",
+            },
+            margin={"l": 70, "r": 30, "t": 70, "b": 120},
+        )
+
+        return fig
 # Plotting utilities for point clouds, diagrams, and landscapes.
 class TDAPlotter:
     """Plotting utilities for point clouds, diagrams, and landscapes."""
@@ -1137,12 +2153,12 @@ class TDAPlotter:
 class CloudDataManager:
     """Main manager for TDA data loading, storage, and public API delegation."""
 
-    VALID_CONDITIONS = {"control", "epha2a"}
+    VALID_CONDITIONS = {"control-L","control-M", "epha2a-SM", "epha2a-WM", "epha2a-WM"}
     REQUIRED_COLUMNS = [
-        "Center of the object_0",
-        "Center of the object_1",
-        "Center of the object_2",
-        "timestep",
+        "centroid_x",
+        "centroid_y",
+        "centroid_z",
+        "timepoint",
     ]
 
     def __init__(self) -> None:
@@ -1166,6 +2182,8 @@ class CloudDataManager:
             return pickle.load(f)
     
     def save(self, filepath: str) -> None:
+        """Pickle this manager and its stored data to ``filepath``."""
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
         with open(filepath, "wb") as f:
             pickle.dump(self, f)
 
@@ -1215,14 +2233,14 @@ class CloudDataManager:
         """Load valid CSV files from a directory."""
         loaded_ids = []
         files = sorted(os.listdir(directory_path))
-        print(files)
         for filename in files:
             lower = filename.lower()
             if not lower.endswith(".csv"):
                 continue
-            if not re.search(r"(^|[^a-z0-9])(control|epha2a)([^a-z0-9]|$)", lower):
+            if not re.search(r"(^|[^a-z0-9])(epha2a|control)([^a-z0-9]|$)", lower):
                 continue
-            loaded_ids.append(self.load_group_from_file(os.path.join(directory_path, filename)))
+            # loaded_ids.append(self.load_group_from_file(os.path.join(directory_path, filename)))
+            self.load_group_from_file(os.path.join(directory_path, filename))
         return loaded_ids
 
     def load_group_from_file(self, filepath: str) -> GroupID:
@@ -1231,7 +2249,7 @@ class CloudDataManager:
         lower = filename.lower()
 
         condition_match = re.search(
-            r"(?:^|[^a-z0-9])(control|epha2a)(?:[^a-z0-9]|$)",
+            r"(?:^|[^a-z0-9])(epha2a-(?:sx|wl|wm|sm)|control-[lm])(?:[^a-z0-9]|$)",
             lower,
         )
         if not condition_match:
@@ -1256,16 +2274,16 @@ class CloudDataManager:
         df = df.dropna(subset=self.REQUIRED_COLUMNS).reset_index(drop=True)
         df = df.rename(
             columns={
-                "Center of the object_0": "x",
-                "Center of the object_1": "y",
-                "Center of the object_2": "z",
-                "timestep": "t"
+                "centroid_x": "x",
+                "centroid_y": "y",
+                "centroid_z": "z",
+                "timepoint": "t"
             }
         )
         group_ids = []
         subgroups = {name: group for name, group in df.groupby('t')}
         # we are only taking every 8th timestep to reduce the number of groups, but you can change this as needed
-        # for timestep in range(0,60,8):
+        # for timestep in range(0,60,6):
         for timestep in subgroups.keys():  #load all timesteps
             gid = (embryo_name, timestep)
             if gid in self.groups:
@@ -1312,7 +2330,7 @@ class CloudDataManager:
         """
         embryo_name, condition, properties = CloudGroupPCA._normalize_pca_key(PCA_key)
         # build a matrix for the control group and compute the mean vector for each timestep
-        controlLandscapeVectors = self.Matrix.build_landscape_matrix( PCA_key=(embryo_name, "control", properties) )
+        controlLandscapeVectors = self.Matrix.build_landscape_matrix( PCA_key=(["control2", "control3","control4"], "control", properties) )
         meanControlVector = pd.DataFrame(controlLandscapeVectors["matrix"], index=[ timestep for id in controlLandscapeVectors["row_order"] for timestep in [id[0][1]] ]).groupby(level=0).mean()
         
         # build a matrix for the specified group and compute the distance from the mean control vector for each timestep
@@ -1333,38 +2351,41 @@ class CloudDataManager:
 
         return table
     # User interface methods that delegate to PCA, TDA, Matrix, and Plotter classes.
-    def compute_pca(self, *args, **kwargs):
-        return self.PCA.run(*args, **kwargs)
+    def compute_pca(self, *args, **kwargs): return self.PCA.run(*args, **kwargs)
     
-    def plot_trajectories(self, *args, **kwargs):
-        return self.PCA.plot_trajectories(*args, **kwargs)
+    def plot_trajectories(self, *args, **kwargs): return self.PCA.plot_trajectories(*args, **kwargs)
     
-    def plot_trajectory_vectors(self, *args, **kwargs):
-        return self.PCA.plot_trajectory_vectors(*args, **kwargs)
-
-    def slider_plot_trajectory_vectors(self, *args, **kwargs):
-        return self.PCA.slider_plot_trajectory_vectors(*args, **kwargs)
+    def plot_trajectory_vectors(self, *args, **kwargs): return self.PCA.plot_trajectory_vectors(*args, **kwargs)
     
-    def compute_persistence_diagram(self, *args, **kwargs):
-        return self.TDA.compute_persistence_diagram(*args, **kwargs)
+    def plot_trajectory_gradient_vectors(self, *args, **kwargs): return self.PCA.plot_trajectory_gradient_vectors(*args, **kwargs)
 
-    def compute_persistence_landscapes(self, *args, **kwargs):
-        return self.TDA.compute_persistence_landscapes(*args, **kwargs)
+    def slider_plot_trajectory_vectors(self, *args, **kwargs): return self.PCA.slider_plot_trajectory_vectors(*args, **kwargs)
+    def plot_sequential_pca_trajectories(self,*args, **kwargs,): return self.PCA.plot_sequential_pca_trajectories(*args,**kwargs,)
+    
+    def compute_persistence_diagram(self, *args, **kwargs): return self.TDA.compute_persistence_diagram(*args, **kwargs)
 
-    def compute_all_persistence_diagrams(self, *args, **kwargs):
-        return self.TDA.compute_all_persistence_diagrams(*args, **kwargs)
+    def compute_persistence_landscapes(self, *args, **kwargs): return self.TDA.compute_persistence_landscapes(*args, **kwargs)
 
-    def compute_all_persistence_landscapes(self, *args, **kwargs):
-        return self.TDA.compute_all_persistence_landscapes(*args, **kwargs)
+    def compute_all_persistence_diagrams(self, *args, **kwargs): return self.TDA.compute_all_persistence_diagrams(*args, **kwargs)
 
-    def build_landscape_matrix(self, *args, **kwargs):
-        return self.Matrix.build_landscape_matrix(*args, **kwargs)
+    def compute_all_persistence_landscapes(self, *args, **kwargs): return self.TDA.compute_all_persistence_landscapes(*args, **kwargs)
 
-    def plot_persistence_landscapes(self, *args, **kwargs):
-        return self.Plotter.plot_persistence_landscapes(*args, **kwargs)
+    def build_landscape_matrix(self, *args, **kwargs): return self.Matrix.build_landscape_matrix(*args, **kwargs)
 
-    def compare_tda_summaries(self, *args, **kwargs):
-        return self.Plotter.compare_tda_summaries(*args, **kwargs)
+    def plot_persistence_landscapes(self, *args, **kwargs): return self.Plotter.plot_persistence_landscapes(*args, **kwargs)
 
-    def plot_tda_summary_for_group(self, *args, **kwargs):
-        return self.Plotter.plot_tda_summary_for_group(*args, **kwargs)
+    def compare_tda_summaries(self, *args, **kwargs): return self.Plotter.compare_tda_summaries(*args, **kwargs)
+
+    def plot_tda_summary_for_group(self, *args, **kwargs): return self.Plotter.plot_tda_summary_for_group(*args, **kwargs)
+
+    def plot_small_multiples(self, *args, **kwargs): return self.PCA.plot_small_multiples(*args, **kwargs)
+
+    def plot_condition_averages(self, *args, **kwargs): return self.PCA.plot_condition_averages(*args, **kwargs)
+
+    def plot_spline_smoothing(self, *args, **kwargs): return self.PCA.plot_spline_smoothing(*args, **kwargs)
+
+    def plot_interactive_plotly(self, *args, **kwargs): return self.PCA.plot_interactive_plotly(*args, **kwargs)
+
+    def plot_averaged_vectors(self, *args, **kwargs): return self.PCA.plot_averaged_vectors(*args, **kwargs)
+
+    def plot_sequential_vectors(self, *args, **kwargs): return self.PCA.plot_sequential_vectors(*args, **kwargs)
